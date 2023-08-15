@@ -4,10 +4,12 @@ from discordbot.games import all
 from discordbot.util import Config
 import logging
 import sys
+import openai
 
 def main():
     with open('data/config.yaml') as f:
         config = Config.getInstance(f)
+    openai.api_key = config['openai_token']
     handler = logging.FileHandler(config['server']['logging']['file'], encoding='utf-8', mode='a')
     stdout = logging.StreamHandler(sys.stdout)
     logging.basicConfig(handlers=[handler, stdout], level=logging.INFO)
