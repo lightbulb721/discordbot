@@ -1,5 +1,4 @@
 server:
-  token: xxxxx
   hangman:
     timeout: 3600
   command_token: /

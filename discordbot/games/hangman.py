@@ -8,11 +8,7 @@ import sqlite3
 import logging
 from threading import Lock
 import uuid
-
 import openai
-
-openai.api_key = "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"
-
 
 
 @dataclass
@@ -235,7 +231,7 @@ def register(bot: commands.Bot):
 
             context = HangmanContext.getInstance()
             game = context.newGame(ctx.guild.id)
-            await reply(content=str(game))
+            await reply(ctx, str(game))
         except Exception as e:
             await logException(ctx, e, 'start')
         finally:
