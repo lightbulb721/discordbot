@@ -7,6 +7,11 @@ import random
 import sqlite3
 import logging
 
+import openai
+
+openai.api_key = "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"
+
+
 
 @dataclass
 class HangmanModel:
@@ -194,6 +199,14 @@ class HangmanContext:
 class HangmanGroup(app_commands.Group):
     pass
 
+def get_synonym(word):
+    response = openai.Completion.create(
+      engine="davinci",
+      prompt=f"Provide a synonym for the word '{word}':",
+      max_tokens=10
+    )
+    return str(response.choices[0].text.strip())
+
 def register(bot: commands.Bot):
     group = HangmanGroup(name="hangman", description="play a game of hangman")
 
@@ -206,6 +219,13 @@ def register(bot: commands.Bot):
         except Exception as e:
             logging.exception('Exception starting game', e)
             await ctx.response.send_message(content=f'@lightbulb721 {e}')
+
+    @group.command(description="get a hint")
+    async def hint(ctx: Interaction):
+        try:
+            context = HangmanContext.getInstance()
+            game = context.newGame(ctx.guild.id)
+            await ctx.response.send_message(content=str(get_synonym(game.word)).replace(game.word,"[Word Hidden]"))
 
     @group.command(description="guess a letter or word")
     async def guess(ctx: Interaction, guess: str):
