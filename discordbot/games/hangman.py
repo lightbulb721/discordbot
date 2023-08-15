@@ -6,6 +6,8 @@ import datetime
 import random
 import sqlite3
 import logging
+from threading import Lock
+import uuid
 
 import openai
 
@@ -98,6 +100,7 @@ class HangmanModel:
 class HangmanDatabase(Store):
     def __init__(self, file):
         self.file = file
+        self.locks: dict[int, Lock] = {}
     
     def startup(self):
         self.conn = sqlite3.connect(self.file)
@@ -118,6 +121,9 @@ class HangmanDatabase(Store):
 
     def get(self, guildId: int, default=None):
         try:
+            if guildId not in self.locks:
+                self.locks[guildId] = Lock()
+            self.locks[guildId].acquire()
             cursor = self.conn.cursor()
             result = cursor.execute("SELECT * from 'hangman' WHERE guildId=:guildId", {"guildId": guildId})
             item = result.fetchone()
@@ -153,6 +159,10 @@ class HangmanDatabase(Store):
             self.conn.commit()
         finally:
             cursor.close()
+    
+    def free(self, guildId: int):
+        if self.locks[guildId].locked():
+            self.locks[guildId].release()
 
 
 class HangmanContext:
@@ -168,10 +178,11 @@ class HangmanContext:
             HangmanContext.__instance = HangmanContext(store, words)
         return HangmanContext.__instance
 
-    def __init__(self, store: Store, words: 'list[str]'):
+    def __init__(self, store: HangmanDatabase, words: 'list[str]'):
         self.store = store
         self.config = Config.getInstance()
         self.words = words
+        self.locks: dict[int, Lock] = {}
 
     def newGame(self, guildId: int):
         game: HangmanModel = self.store.get(guildId)
@@ -195,57 +206,85 @@ class HangmanContext:
 
     def setGame(self, guildId: int, game: HangmanModel):
         game = self.store.set(guildId, game)
+    
+    def freeGame(self, guildId):
+        self.store.free(guildId)
 
 class HangmanGroup(app_commands.Group):
     pass
 
 def get_synonym(word):
-    response = openai.Completion.create(
-      engine="davinci",
-      prompt=f"Provide a synonym for the word '{word}':",
+    messages = [{'role': 'user', 'content': f"Provide a synonym for the word '{word}' give me a sentence and don't use the word in the sentence:"}]
+    response = openai.ChatCompletion.create(
+      model="gpt-4",
+      temperature=1.2,
+      messages=messages,
       max_tokens=10
     )
-    return str(response.choices[0].text.strip())
+    return response.choices[0].message.content.strip().lower()
 
 def register(bot: commands.Bot):
     group = HangmanGroup(name="hangman", description="play a game of hangman")
+    config = Config.getInstance()
 
     @group.command(description="start a game of hangman")
     async def start(ctx: Interaction):
         try:
+            if config['debug']:
+                await ctx.response.defer()
+
             context = HangmanContext.getInstance()
             game = context.newGame(ctx.guild.id)
-            await ctx.response.send_message(content=str(game))
+            await reply(content=str(game))
         except Exception as e:
-            logging.exception('Exception starting game', e)
-            await ctx.response.send_message(content=f'@lightbulb721 {e}')
+            await logException(ctx, e, 'start')
+        finally:
+            context.freeGame(ctx.guild.id)
 
-    @group.command(description="get a hint")
+    @group.command(description="Get a hint from open ai. Milage may vary 🙃")
     async def hint(ctx: Interaction):
         try:
+            if config['debug']:
+                await ctx.response.defer()
+
             context = HangmanContext.getInstance()
-            game = context.newGame(ctx.guild.id)
-            await ctx.response.send_message(content=str(get_synonym(game.word)).replace(game.word,"[Word Hidden]"))
+            game = context.getGame(ctx.guild.id)
+            message = str(get_synonym(game.word)).replace(game.word,"[Word Hidden]")
+            logging.info(f'hint: {message}')
+            await reply(ctx, message)
+        except Exception as e:
+            await logException(ctx, e, 'hint')
+        finally:
+            context.freeGame(ctx.guild.id)
+        
 
     @group.command(description="guess a letter or word")
     async def guess(ctx: Interaction, guess: str):
         try:
+            if config['debug']:
+                await ctx.response.defer()
+        
             context = HangmanContext.getInstance()
             game: HangmanModel = context.getGame(ctx.guild.id)
+            guess = guess.lower()
 
             if game.numGuesses >= 6 or game.current == game.word:
                 context.setGame(ctx.guild.id, None)
-                await ctx.response.send_message(f'Game over! The word was {game.word}\n{game}')
+                await reply(ctx, f'Game over! The word was {game.word}\n{game}')
                 return
 
             if len(guess) < 0:
-                await ctx.response.send_message(f'bad guess\n{game}')
+                await reply(ctx, f'bad guess\n{game}')
+                return
+
+            if guess in game.guesses:
+                await reply(ctx, f'guess: {guess} has already been guessed\n{game}')
                 return
             
             if len(guess) > 1:
                 if guess == game.word:
                     game.current = game.word
-                    await ctx.response.send_message(f'Win!\n{game}')
+                    await reply(ctx, f'Win!\n{game}')
                     context.setGame(ctx.guild.id, None)
                     return
                 else:
@@ -253,10 +292,10 @@ def register(bot: commands.Bot):
                     game.guesses.append(guess)
                     if game.numGuesses >= 6:
                         context.setGame(ctx.guild.id, None)
-                        await ctx.response.send_message(f'Lose the word was {game.word}\n{game}')
+                        await reply(ctx, f'Lose the word was {game.word}\n{game}')
                         return
                     context.setGame(ctx.guild.id, game)
-                    await ctx.response.send_message(f'Incorrect guess {guess}\n{game}')
+                    await reply(ctx, f'Incorrect guess {guess}\n{game}')
                     return
                 
             if guess not in game.word:
@@ -264,12 +303,16 @@ def register(bot: commands.Bot):
                 game.guesses.append(guess)
                 if game.numGuesses >= 6:
                     context.setGame(ctx.guild.id, None)
-                    await ctx.response.send_message(f'Lose the word was {game.word}\n{game}')
+                    await reply(ctx, f'Lose the word was {game.word}\n{game}')
                     return
                 context.setGame(ctx.guild.id, game)
-                await ctx.response.send_message(f'{guess} is not in the word\n{game}')
+                await reply(ctx, f'{guess} is not in the word\n{game}')
                 return
             newWord = ''
+
+            if len(game.word) != len(game.current):
+                raise ValueError('Word and current guess are different lengths!')
+
             for i, char in enumerate(game.word):
                 if char == guess:
                     newWord += guess
@@ -277,16 +320,27 @@ def register(bot: commands.Bot):
                     newWord += game.current[i]
             game.current = newWord
             if game.current == game.word:
-                await ctx.response.send_message(f'Win!\n{game}')
+                await reply(ctx, f'Win!\n{game}')
                 context.setGame(ctx.guild.id, None)
                 return
             context.setGame(ctx.guild.id, game)
-            await ctx.response.send_message(f'{guess} is in the word\n{game}')
+            await reply(ctx, f'{guess} is in the word\n{game}')
+
         except ValueError as e:
-            logging.exception('Exception guessing during game', e)
-            await ctx.response.edit_message(str(e))
+            await logException(ctx, e, 'guess')
         except Exception as e:
-            logging.exception('Exception guessing during game', e)
-            await ctx.response.edit_message(f'@lightbulb721 {e}')
+            await logException(ctx, e, 'guess')
+        finally:
+            context.freeGame(ctx.guild.id)
         
     return group
+async def logException(ctx: Interaction, e: Exception, call: str):
+    id = uuid.uuid1()
+    logging.exception(f'Id: {id} Exception guessing during {call} {e}')
+    await reply(ctx, f'@lightbulb721 {call} {id} {e}')
+
+async def reply(ctx: Interaction, message):
+    if ctx.response.is_done():
+        await ctx.followup.send(content=message)
+    else:
+        await ctx.response.send_message(message)
