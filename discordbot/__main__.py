@@ -23,7 +23,7 @@ def main():
     for command in all:
         c = command(client)
         client.tree.add_command(c)
-    client.run(config['server']['token'], log_handler=handler)
+    client.run(config['discord_token'], log_handler=handler)
 
 if __name__ == '__main__':
     try:
