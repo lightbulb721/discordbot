@@ -264,9 +264,9 @@ def register(bot: commands.Bot):
             await ctx.response.send_message(f'{guess} is in the word\n{game}')
         except ValueError as e:
             logging.exception('Exception guessing during game', e)
-            await ctx.response.send_message(str(e))
+            await ctx.response.edit_message(str(e))
         except Exception as e:
             logging.exception('Exception guessing during game', e)
-            await ctx.response.send_message(f'@lightbulb721 {e}')
+            await ctx.response.edit_message(f'@lightbulb721 {e}')
         
     return group
