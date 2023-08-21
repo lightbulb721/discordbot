@@ -9,6 +9,7 @@ import logging
 from threading import Lock
 import uuid
 import openai
+import requests
 
 
 @dataclass
@@ -20,6 +21,7 @@ class HangmanModel:
     guildId: int = 0
     started: int = 0
     lastMove: int = 0
+    hint: str = ''
 
     def __str__(self):
         if self.numGuesses == 0:
@@ -105,7 +107,7 @@ class HangmanDatabase(Store):
             result = cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='hangman';")
             item = result.fetchone()
             if item is None:
-                cursor.execute(f"CREATE TABLE hangman(guildId integer primary key, word, current, numGuesses, started, lastMove);")
+                cursor.execute(f"CREATE TABLE hangman(guildId integer primary key, word, current, numGuesses, started, lastMove, hint);")
 
             result = cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='hangman_guesses';")
             item = result.fetchone()
@@ -126,7 +128,7 @@ class HangmanDatabase(Store):
             result = cursor.execute("SELECT guess from 'hangman_guesses' WHERE guildId=:guildId", {"guildId": guildId})
             guesses = [item[0] for item in result.fetchall()]
             if item is not None:
-                return HangmanModel(guildId=item[0], word=item[1], current=item[2], numGuesses=item[3], started=item[4], lastMove=item[5], guesses=guesses)
+                return HangmanModel(guildId=item[0], word=item[1], current=item[2], numGuesses=item[3], started=item[4], lastMove=item[5], hint=item[6], guesses=guesses)
             else:
                 return default
         finally:
@@ -147,8 +149,8 @@ class HangmanDatabase(Store):
         guesses = d.pop('guesses')
         try:
             cursor = self.conn.cursor()
-            cursor.execute("""INSERT INTO 'hangman' (word, current, numGuesses, guildId, started, lastMove) VALUES(:word, :current, :numGuesses, :guildId, :started, :lastMove)
-                              ON CONFLICT(guildId) DO UPDATE SET current=excluded.current, numGuesses=excluded.numGuesses, lastMove=excluded.lastMove""", d)
+            cursor.execute("""INSERT INTO 'hangman' (word, current, numGuesses, guildId, started, lastMove, hint) VALUES(:word, :current, :numGuesses, :guildId, :started, :lastMove, :hint)
+                              ON CONFLICT(guildId) DO UPDATE SET current=excluded.current, numGuesses=excluded.numGuesses, lastMove=excluded.lastMove, hint=excluded.hint""", d)
             cursor.execute("DELETE FROM 'hangman_guesses' WHERE guildId=:guildId", {"guildId": guildId})
             if len(guesses) > 0:
                 cursor.executemany("INSERT INTO 'hangman_guesses'(guildId, guess) VALUES(:guildId, :guess)", [{"guildId": guildId, "guess": guess} for guess in guesses])
@@ -157,8 +159,7 @@ class HangmanDatabase(Store):
             cursor.close()
     
     def free(self, guildId: int):
-        if self.locks[guildId].locked():
-            self.locks[guildId].release()
+        self.locks[guildId].release()
 
 
 class HangmanContext:
@@ -219,6 +220,20 @@ def get_synonym(word):
     )
     return response.choices[0].message.content.strip().lower()
 
+def get_sentence(word, token):
+    params = {
+        'useCanonical': False,
+        'api_key': token
+    }
+    headers = {
+        'Accept': 'application/json'
+    }
+    response = requests.get(f'https://api.wordnik.com/v4/word.json/{word}/topExample', params=params, headers=headers)
+    if not response.ok:
+        raise Exception(f'Failed wordnik api request {response.status_code}')
+    body = response.json()
+    return body.get('text', '')
+
 def register(bot: commands.Bot):
     group = HangmanGroup(name="hangman", description="play a game of hangman")
     config = Config.getInstance()
@@ -237,7 +252,7 @@ def register(bot: commands.Bot):
         finally:
             context.freeGame(ctx.guild.id)
 
-    @group.command(description="Get a hint from open ai. Milage may vary 🙃")
+    @group.command(description="Get a hint from open ai and wordnik. Milage may vary 🙃")
     async def hint(ctx: Interaction):
         try:
             if config['debug']:
@@ -245,8 +260,23 @@ def register(bot: commands.Bot):
 
             context = HangmanContext.getInstance()
             game = context.getGame(ctx.guild.id)
-            message = str(get_synonym(game.word)).replace(game.word,"[Word Hidden]")
-            logging.info(f'hint: {message}')
+            aiHint = str(get_synonym(game.word)).replace(game.word,"[Word Hidden]")
+            logging.info(f'ai hint: {aiHint}')
+            if game.hint == '':
+                wordnikHint = get_sentence(game.word, config['wordnik_token']).replace(game.word, "[Word Hidden]")
+                game.hint = wordnikHint
+                logging.info(f'wordnik hint: {wordnikHint}')
+                context.setGame(ctx.guild.id, game)
+            else:
+                wordnikHint = game.hint
+            message = f'''
+Chat-GPT hint
+{aiHint}
+
+===============================================================================
+wordnik hint
+{wordnikHint}
+            '''
             await reply(ctx, message)
         except Exception as e:
             await logException(ctx, e, 'hint')
